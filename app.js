@@ -1,7 +1,5 @@
 require('dotenv').config();
 console.log("🟡 Script starting...");
-console.log("🟡 Script starting...");
-
 
 const mqtt = require('mqtt');
 const admin = require('firebase-admin');
@@ -45,13 +43,45 @@ db.ref('test-connection').push({
 const client = mqtt.connect(`mqtts://${process.env.HIVEMQ_HOST}:${process.env.HIVEMQ_PORT}`, {
   username: process.env.HIVEMQ_USERNAME,
   password: process.env.HIVEMQ_PASSWORD,
-  rejectUnauthorized: false,  // accept HiveMQ TLS
+  rejectUnauthorized: false,
   connectTimeout: 4000,
   clientId: `mqttjs_${Math.random().toString(16).slice(2, 10)}`,
 });
 
 console.log("🚀 Starting MQTT to Firebase Bridge...");
 
+// 🕒 Watchdog Timer
+let heartbeatTimeout;
+
+// Function to trigger when no message is received in time
+function setOfflineStatus() {
+  console.warn("🔴 No MQTT message received in 30s. Marking as offline.");
+
+  db.ref('system-status').push({
+    status: "Server is down, check ESP32",
+    timestamp: Date.now(),
+    lastSeen: Date.now() - 30000 // approx time since last message
+  }, (err) => {
+    if (err) {
+      console.error("❌ Failed to write offline status to Firebase:", err);
+    } else {
+      console.log("📢 Offline status updated in Firebase");
+    }
+  });
+}
+
+// Reset the watchdog timer
+function resetWatchdog() {
+  if (heartbeatTimeout) {
+    clearTimeout(heartbeatTimeout);
+  }
+
+  heartbeatTimeout = setTimeout(() => {
+    setOfflineStatus();
+  }, 30000); // 30 seconds
+}
+
+// On first connect, start the watchdog (waiting for first message)
 client.on('connect', () => {
   console.log('✅ Connected to HiveMQ');
   client.subscribe('pot/adc/1', (err) => {
@@ -59,6 +89,8 @@ client.on('connect', () => {
       console.error('❌ Subscribe error:', err.message);
     } else {
       console.log('📡 Subscribed to pot/adc/1');
+      // ✅ Start watchdog: expect a message within 30s
+      resetWatchdog();
     }
   });
 });
@@ -67,21 +99,27 @@ client.on('message', (topic, message) => {
   const payload = message.toString();
   console.log(`📥 ${topic}: ${payload}`);
 
-  db.ref('mqttData').push({
+  // ✅ Reset watchdog on every message
+  resetWatchdog();
+
+  // Optional: Clear offline status when data returns
+  db.ref('system-status').push({
     topic,
     value: payload,
+    status: "online",
     timestamp: Date.now(),
   }, (err) => {
     if (err) {
       console.error('❌ Firebase write failed:', err);
     } else {
-      console.log('✅ Data saved to Firebase');
+      console.log('✅ Data & online status saved to Firebase');
     }
   });
 });
 
 client.on('error', (err) => {
   console.error('❌ MQTT Error:', err.message);
+  // You might also want to set offline status here if connection drops
 });
 
 // ---------------- 🛡️ Global Error Handlers ----------------
